@@ -536,41 +536,4 @@ if uploaded:
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-# ==============================
-# SIDEBAR: Badges del modelo
-# ==============================
-with st.sidebar:
-    exp2 = st.expander("🔎 Estado del modelo", expanded=False)
-    with exp2:
-        if 'model_meta' in locals():
-            kind = model_meta.get("kind", "desconocido")
-            arch = model_meta.get("arch", "—")
-            device = model_meta.get("device", "—")
-            used_class = model_meta.get("used_class", "")
-            notes = model_meta.get("notes", "")
 
-            cls = {
-                "TorchScript": "badge-cyan",
-                "PickledModule": "badge-green",
-                "Checkpoint+Class": "badge-amber",
-                "Checkpoint+Fallback": "badge-red",
-            }.get(kind, "badge")
-
-            arch_label = "TorchScript (exportado)" if kind == "TorchScript" else arch
-
-            st.markdown(
-                f"""
-                <div>
-                  <span class="badge {cls}">{kind}</span>
-                  <span class="badge badge-cyan">Arch: {arch_label}</span>
-                  <span class="badge badge-cyan">Device: {device}</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            if used_class:
-                st.markdown(f'<div class="muted">Clase usada: <strong>{used_class}</strong></div>', unsafe_allow_html=True)
-            if notes:
-                st.markdown(f'<div class="muted">{notes}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="muted">El modelo se cargará tras la primera predicción.</div>', unsafe_allow_html=True)

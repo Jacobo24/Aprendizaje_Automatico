@@ -10,7 +10,7 @@ from torchvision import transforms
 import streamlit as st
 import pandas as pd
 import altair as alt
-import matplotlib.cm as cm  # <-- colormaps
+from matplotlib import colormaps as mpl_cmaps  # cmap moderno (Matplotlib 3.7+)
 
 # ==============================
 # CONFIG BÁSICA
@@ -445,15 +445,23 @@ def gradcam_or_saliency(image: Image.Image, model, target_class_idx: Optional[in
     base = image.resize((IMAGE_SIZE, IMAGE_SIZE))
     base_rgba = base.convert("RGBA")
 
-    cmap = cm.get_cmap(st.session_state.get("HEATMAP_CMAP", "turbo"))
-    rgba = cmap(heat)  # (H, W, 4) floats [0,1]
-    rgba[..., 3] = float(st.session_state.get("HEATMAP_ALPHA", 0.45))
-    overlay = Image.fromarray((rgba * 255).astype(np.uint8), mode="RGBA")
+    # Colormap moderno (Matplotlib 3.7+)
+    cmap = mpl_cmaps.get_cmap(st.session_state.get("HEATMAP_CMAP", "turbo"))
+
+    # RGBA en [0,1] -> uint8
+    rgba = cmap(heat)  # (H, W, 4)
+    rgba[..., 3] = float(st.session_state.get("HEATMAP_ALPHA", 0.45))  # opacidad
+    overlay = Image.fromarray((rgba * 255).astype(np.uint8))           # inferido RGBA
+    overlay = overlay.convert("RGBA")                                   # garantizar RGBA
+
     blended = Image.alpha_composite(base_rgba, overlay).convert("RGB")
 
-    heat_rgb = Image.fromarray((cmap(heat)[..., :3] * 255).astype(np.uint8), mode="RGB")
+    # Heatmap “solo” (RGB)
+    heat_rgb_arr = (cmap(heat)[..., :3] * 255).astype(np.uint8)
+    heat_rgb = Image.fromarray(heat_rgb_arr)  # inferido RGB
 
     return heat, blended, heat_rgb
+
 
 # ==============================
 # CABECERA

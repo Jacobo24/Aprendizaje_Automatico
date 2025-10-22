@@ -1,6 +1,7 @@
 import os, json, importlib.util, inspect
 from typing import List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +10,7 @@ from torchvision import transforms
 import streamlit as st
 import pandas as pd
 import altair as alt
+import matplotlib.cm as cm  # <-- colormaps
 
 # ==============================
 # CONFIG BÁSICA
@@ -28,13 +30,13 @@ st.set_page_config(page_title="¿Melanoma maligno o benigno?", page_icon="🫀",
 # ==============================
 # TEMA OSCURO - AZUL / CIAN
 # ==============================
-ACCENT="#00e5ff"         # cian brillante
-ACCENT_TEXT="#001015"    # texto oscuro sobre cian
-BG="#0b1220"             # fondo principal (azul muy oscuro)
-BG_SIDEBAR="#101a30"     # fondo sidebar
-TEXT="#e8f4ff"           # texto claro
-CARD="#142038"           # tarjetas / cuadros
-BORDER="#1f3559"         # bordes azulados
+ACCENT="#00e5ff"
+ACCENT_TEXT="#001015"
+BG="#0b1220"
+BG_SIDEBAR="#101a30"
+TEXT="#e8f4ff"
+CARD="#142038"
+BORDER="#1f3559"
 
 st.markdown(f"""
 <style>
@@ -121,7 +123,6 @@ def _dataframe(df, **kwargs):
         return st.dataframe(df, **kwargs, use_container_width=True)
 
 def _altair_chart(chart, **kwargs):
-    # Streamlit estable aún no acepta width en altair_chart -> fallback a use_container_width
     kwargs.pop('width', None)
     return st.altair_chart(chart, **kwargs, use_container_width=True)
 
@@ -134,7 +135,7 @@ def ensure_labels(path: str) -> List[str]:
             json.dump(["Benigno","Maligno"], f, ensure_ascii=False, indent=2)
     with open(path, "r", encoding="utf-8") as f:
         labels = json.load(f)
-    if isinstance(labels, dict):  # soporta {"0": "Benigno", "1": "Maligno"}
+    if isinstance(labels, dict):
         items = sorted(labels.items(), key=lambda kv: int(kv[0]))
         labels = [name for _, name in items]
     return list(labels)
@@ -142,7 +143,7 @@ def ensure_labels(path: str) -> List[str]:
 labels = ensure_labels(LABELS_PATH)
 
 # ==============================
-# SIDEBAR: Configuración y ajustes de inferencia (sin TOP_K ni ImageNet)
+# SIDEBAR: Configuración
 # ==============================
 with st.sidebar:
     exp = st.expander("⚙️ Configuración y detalles técnicos", expanded=False)
@@ -156,24 +157,21 @@ with st.sidebar:
         st.subheader("Ajustes para igualar tu script")
 
         SS = st.session_state
-        SS.setdefault("BINARY_MODE", True)          # renombrado: más claro
+        SS.setdefault("BINARY_MODE", True)
         SS.setdefault("THRESHOLD", 0.5)
         SS.setdefault("MALIGNANT_IDX", 1)
         SS.setdefault("RESIZE_STRATEGY", "Mantener ratio + CenterCrop")
 
         SS.BINARY_MODE = st.checkbox(
-            "🔧 Modo binario",
-            value=SS.BINARY_MODE,
+            "🔧 Modo binario", value=SS.BINARY_MODE,
             help="Actívalo si tu modelo es binario (1 ó 2 logits)."
         )
         SS.THRESHOLD = st.slider(
-            "Umbral maligno",
-            0.0, 1.0, float(SS.THRESHOLD), 0.01,
+            "Umbral maligno", 0.0, 1.0, float(SS.THRESHOLD), 0.01,
             help="Se aplica sobre p(Maligno)."
         )
         SS.MALIGNANT_IDX = st.number_input(
-            "Índice de 'Maligno'",
-            min_value=0, step=1, value=int(SS.MALIGNANT_IDX),
+            "Índice de 'Maligno'", min_value=0, step=1, value=int(SS.MALIGNANT_IDX),
             help="Índice de la clase maligna si tu salida tiene 2 logits."
         )
         SS.RESIZE_STRATEGY = st.selectbox(
@@ -183,6 +181,31 @@ with st.sidebar:
         )
 
         st.caption("Normalización fija: mean=std=0.5.")
+
+        # ---- Controles del mapa de calor ----
+        st.markdown("---")
+        st.subheader("Mapa de calor")
+        SS.setdefault("HEATMAP_MODE", "Grad-CAM (CNN)")
+        SS.HEATMAP_MODE = st.selectbox(
+            "Técnica",
+            ["Grad-CAM (CNN)", "Saliency (gradiente)"],
+            index=0 if SS.get("HEATMAP_MODE","").startswith("Grad-CAM") else 1,
+            help="Grad-CAM necesita una última capa conv accesible. Si no es posible, usa saliency."
+        )
+        SS.setdefault("HEATMAP_ON", True)
+        SS.HEATMAP_ON = st.checkbox("Mostrar mapa de calor al predecir", value=SS.HEATMAP_ON)
+
+        SS.setdefault("HEATMAP_CMAP", "turbo")
+        SS.HEATMAP_CMAP = st.selectbox(
+            "Colormap",
+            ["turbo", "viridis", "plasma", "magma", "jet"],
+            index=["turbo","viridis","plasma","magma","jet"].index(SS.HEATMAP_CMAP)
+        )
+        SS.setdefault("HEATMAP_ALPHA", 0.45)
+        SS.HEATMAP_ALPHA = st.slider("Opacidad del overlay", 0.10, 0.90, float(SS.HEATMAP_ALPHA), 0.01)
+
+        SS.setdefault("SHOW_HEATMAP_ONLY", True)
+        SS.SHOW_HEATMAP_ONLY = st.checkbox("Mostrar heatmap solo (además del overlay)", value=SS.SHOW_HEATMAP_ONLY)
 
 # ==============================
 # CARGA MODELO (TorchScript o state_dict) + meta
@@ -283,7 +306,7 @@ def load_model(path: str, num_classes_hint: Optional[int] = None):
 # PREPROCESADO & PREDICCIÓN (normalización fija 0.5)
 # ==============================
 def build_transform(image_size: int):
-    mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)   # sin opción ImageNet
+    mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
     if st.session_state.RESIZE_STRATEGY.startswith("Mantener"):
         tfs = [transforms.Resize(image_size, antialias=True), transforms.CenterCrop(image_size)]
     else:
@@ -301,7 +324,6 @@ def predict(image: Image.Image, model, labels: List[str]):
     out_dim = logits.shape[-1] if logits.ndim >= 2 else 1
 
     if st.session_state.BINARY_MODE:
-        # Suma = 1.0 garantizada
         if logits.ndim == 1:
             logits = logits.unsqueeze(0)
 
@@ -329,7 +351,6 @@ def predict(image: Image.Image, model, labels: List[str]):
         scores = {maligno_label: p_m, benigno_label: p_b}
         return pred_label, scores
 
-    # Multiclase → softmax sobre todas las clases
     probs = F.softmax(logits, dim=-1).squeeze(0)
     num_classes = probs.shape[-1]
     _labels = labels if (labels and len(labels) == num_classes) else [f"class_{i}" for i in range(num_classes)]
@@ -349,6 +370,90 @@ def prob_bar_chart(df: pd.DataFrame):
             .properties(height=280, background=BG)
             .configure_axis(labelColor=TEXT, titleColor=TEXT, grid=False, domainColor=BORDER)
             .configure_view(strokeWidth=0))
+
+# ==============================
+# MAPA DE CALOR (Grad-CAM + Saliency fallback)
+# ==============================
+def _find_last_conv(m: nn.Module) -> Optional[nn.Module]:
+    last = None
+    for layer in m.modules():
+        if isinstance(layer, nn.Conv2d):
+            last = layer
+    return last
+
+@torch.inference_mode(False)   # necesitamos gradientes
+def gradcam_or_saliency(image: Image.Image, model, target_class_idx: Optional[int] = None, use_gradcam: bool = True):
+    """
+    Devuelve (heatmap_np_0a1, overlay_PIL, heatmap_rgb_PIL).
+    """
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    tf = build_transform(IMAGE_SIZE)
+    x = tf(image).unsqueeze(0).to(DEVICE)
+    x.requires_grad_(True)
+
+    logits = model(x)
+    if isinstance(logits, (list, tuple)):
+        logits = logits[0]
+
+    if logits.ndim == 1:
+        score = logits.squeeze()
+    else:
+        if target_class_idx is None:
+            target_class_idx = int(torch.argmax(logits, dim=-1).item())
+        score = logits[:, target_class_idx].sum()
+
+    last_conv = _find_last_conv(model) if use_gradcam and isinstance(model, nn.Module) else None
+    heat = None
+
+    if last_conv is not None:
+        feats, grads = [], []
+        def fwd_hook(_, __, output): feats.append(output)
+        def bwd_hook(_, grad_in, grad_out): grads.append(grad_out[0])
+        h1 = last_conv.register_forward_hook(fwd_hook)
+        h2 = last_conv.register_full_backward_hook(bwd_hook)
+
+        model.zero_grad(set_to_none=True)
+        out2 = model(x)
+        if isinstance(out2, (list, tuple)): out2 = out2[0]
+        _score = out2.squeeze() if out2.ndim == 1 else out2[:, target_class_idx].sum()
+        _score.backward(retain_graph=False)
+        h1.remove(); h2.remove()
+
+        if feats and grads:
+            A = feats[-1]           # [B, C, H, W]
+            G = grads[-1]           # [B, C, H, W]
+            weights = G.mean(dim=(2,3), keepdim=True)
+            cam = (A * weights).sum(dim=1, keepdim=True)
+            cam = F.relu(cam)
+            cam = F.interpolate(cam, size=(IMAGE_SIZE, IMAGE_SIZE), mode="bilinear", align_corners=False)
+            cam = cam.squeeze().detach()
+            cam -= cam.min()
+            if cam.max() > 0: cam /= cam.max()
+            heat = cam.clamp(0,1).float().cpu().numpy()
+
+    if heat is None:
+        model.zero_grad(set_to_none=True)
+        score.backward(retain_graph=False)
+        g = x.grad.detach()
+        sal = g.abs().mean(dim=1, keepdim=True)
+        sal -= sal.min()
+        if sal.max() > 0: sal /= sal.max()
+        heat = sal.squeeze().clamp(0,1).cpu().numpy()
+
+    # --- Construir imágenes: overlay y heatmap solo ---
+    base = image.resize((IMAGE_SIZE, IMAGE_SIZE))
+    base_rgba = base.convert("RGBA")
+
+    cmap = cm.get_cmap(st.session_state.get("HEATMAP_CMAP", "turbo"))
+    rgba = cmap(heat)  # (H, W, 4) floats [0,1]
+    rgba[..., 3] = float(st.session_state.get("HEATMAP_ALPHA", 0.45))
+    overlay = Image.fromarray((rgba * 255).astype(np.uint8), mode="RGBA")
+    blended = Image.alpha_composite(base_rgba, overlay).convert("RGB")
+
+    heat_rgb = Image.fromarray((cmap(heat)[..., :3] * 255).astype(np.uint8), mode="RGB")
+
+    return heat, blended, heat_rgb
 
 # ==============================
 # CABECERA
@@ -386,8 +491,7 @@ if uploaded:
         model, model_meta = load_model(MODEL_PATH, num_classes_hint=len(labels) if labels else None)
         top_label, scores = predict(image, model, labels)
 
-        # Mostrar resultado con color dinámico (dentro del spinner → top_label ya existe)
-        if "malig" in top_label.lower():  # detecta "maligno" o similar
+        if "malig" in top_label.lower():
             st.error(f"❌ Resultado: **{top_label}**")
         else:
             st.success(f"✅ Resultado: **{top_label}**")
@@ -399,6 +503,28 @@ if uploaded:
             _altair_chart(prob_bar_chart(df))
             st.caption(f"Suma de probabilidades: {sum(scores.values()):.6f}")
 
+        # === MAPA DE CALOR ===
+        if st.session_state.HEATMAP_ON:
+            target_idx = None
+            if st.session_state.BINARY_MODE:
+                target_idx = int(st.session_state.MALIGNANT_IDX)
+
+            use_gradcam = st.session_state.HEATMAP_MODE.startswith("Grad-CAM")
+            try:
+                _, heat_overlay, heat_only = gradcam_or_saliency(
+                    image, model, target_class_idx=target_idx, use_gradcam=use_gradcam
+                )
+                st.subheader("Mapa de calor de atención del modelo")
+
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    _image(heat_overlay, caption=f"Overlay ({st.session_state.HEATMAP_CMAP}, α={st.session_state.HEATMAP_ALPHA:.2f})")
+                with c2:
+                    if st.session_state.SHOW_HEATMAP_ONLY:
+                        _image(heat_only, caption="Heatmap solo")
+
+            except Exception as e:
+                st.warning(f"No se pudo generar el mapa de calor ({type(e).__name__}: {e}). Prueba con 'Saliency (gradiente)'.")
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 

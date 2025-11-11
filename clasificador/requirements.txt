@@ -6,3 +6,11 @@ numpy
 pandas
 altair
 matplotlib>=3.7
+scikit-learn
+seaborn
+joblib
+tqdm
+requests
+yfinance
+transformers>=4.50
+tensorflow>=2.15

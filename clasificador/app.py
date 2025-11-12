@@ -2,12 +2,11 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+import matplotlib.pyplot as plt
+import io
 
-st.set_page_config(
-    page_title="Dashboard de Inversión",
-    page_icon="💹",
-    layout="wide"
-)
 
 # ========= PALETA =========
 COLOR_BURDEOS = "#390517"
@@ -170,8 +169,8 @@ best_san = mejor_oportunidad(preds_san, SAN_ACTUAL, "SAN_Close")
 best_bbva = mejor_oportunidad(preds_bbva, BBVA_ACTUAL, "BBVA_Close")
 
 # ========= SIDEBAR =========
-st.sidebar.title("💹 Inversión")
-page = st.sidebar.radio("Secciones", ["Inicio", "Modelos"])
+st.sidebar.title("Inversión")
+page = st.sidebar.radio("Secciones", ["Inicio", "Modelos", "Inversión"])
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Ref. SAN (31/10):** {SAN_ACTUAL:.3f} €")
 st.sidebar.markdown(f"**Ref. BBVA (31/10):** {BBVA_ACTUAL:.3f} €")
@@ -183,6 +182,42 @@ def separador():
         f"<hr style='border:0; border-top:2px solid {COLOR_BURDEOS}33; margin:1.4rem 0 1rem 0;'/>",
         unsafe_allow_html=True
     )
+
+#======== Predecir =========
+def cargar_df_bbva():
+    df = pd.read_csv("../csv/bbva_enriched.csv", parse_dates=["Date"])
+    df.sort_values("Date", inplace=True)
+    return df
+
+def cargar_df_san():
+    df = pd.read_csv("../csv/santander_enriched.csv", parse_dates=["Date"])
+    df.sort_values("Date", inplace=True)
+    return df
+
+def preparar_series_para_modelo(df, col_target="BBVA_Close", window_size=25):
+    # nos quedamos solo con la columna objetivo
+    serie = df[[col_target]].values.astype(float)
+    scaler_y = MinMaxScaler()
+    serie_scaled = scaler_y.fit_transform(serie)
+    return serie, serie_scaled, scaler_y
+
+def predecir_n_dias_univariante(model, serie_scaled, scaler_y, n_dias=5, window_size=25):
+    """
+    serie_scaled: array 2D (n, 1) ya escalado
+    """
+    historia = serie_scaled.flatten().tolist()
+    preds = []
+
+    for _ in range(n_dias):
+        ventana = np.array(historia[-window_size:]).reshape(1, window_size, 1)
+        pred_scaled = model.predict(ventana, verbose=0)
+        pred_real = scaler_y.inverse_transform(pred_scaled)[0, 0]
+        preds.append(pred_real)
+        # añadimos el valor escalado a la historia para la siguiente vuelta
+        historia.append(pred_scaled[0, 0])
+
+    return preds
+
 
 # ========= INICIO =========
 if page == "Inicio":
@@ -234,7 +269,7 @@ if page == "Inicio":
         unsafe_allow_html=True,
     )
 
-    st.markdown('<h1 class="main-title">Panel de inversión</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-title">Panel de principal</h1>', unsafe_allow_html=True)
     st.write("Vista rápida usando las predicciones precalculadas (5 días).")
 
     # ====== noticias (2 filas x 2 columnas) ======
@@ -304,7 +339,7 @@ if page == "Inicio":
         santander_html += (
             f'<span style="display:inline-block;background:linear-gradient(135deg,{COLOR_VERDE},{COLOR_NEGRO_VERDOSO});'
             f'color:#fff;padding:1rem 1.8rem;border-radius:0.9rem;font-weight:600;border:2px solid {COLOR_DORADO};font-size:1rem;">'
-            '✔ Compensa entrar'
+            '✔ Mayor beneficio'
             '</span>'
         )
     else:
@@ -342,7 +377,7 @@ if page == "Inicio":
         bbva_html += (
             f'<span style="display:inline-block;background:linear-gradient(135deg,{COLOR_VERDE},{COLOR_NEGRO_VERDOSO});'
             f'color:#fff;padding:1rem 1.8rem;border-radius:0.9rem;font-weight:600;border:2px solid {COLOR_DORADO};font-size:1rem;">'
-            '✔ Compensa entrar'
+            '✔ Mayor beneficio'
             '</span>'
         )
     else:
@@ -362,10 +397,10 @@ if page == "Inicio":
 
 
 # ========= MODELOS =========
-else:
+elif page == "Modelos":
     st.markdown('<h1 class="main-title">Modelos y detalle</h1>', unsafe_allow_html=True)
 
-    tab_san, tab_bbva = st.tabs(["🔴 Santander", "📘 BBVA"])
+    tab_san, tab_bbva = st.tabs(["Santander", "BBVA"])
 
     with tab_san:
         st.subheader("Predicción 5 días - Santander")
@@ -388,3 +423,151 @@ else:
         df_bbva["Actual_31_10"] = BBVA_ACTUAL
         df_bbva["pct_change"] = (df_bbva["BBVA_Close"] - BBVA_ACTUAL) / BBVA_ACTUAL * 100
         st.dataframe(df_bbva, use_container_width=True)
+
+
+# ========= INVERSIÓN =========
+else:  # Inversión
+    st.markdown(
+        f"""
+        <div style="margin-bottom:0.5rem;">
+            <h1 class="main-title" style="margin-bottom:0.25rem;">Panel de inversión</h1>
+            <p style="color:{COLOR_NEGRO_VERDOSO}; font-size:0.95rem; margin:0;">
+                Vista rápida usando las predicciones precalculadas (5 días).
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+    # contenedor con fondo verde suave
+    st.markdown(
+        f"""
+        <div style="
+            background:{COLOR_VERDE}10;
+            border:2px solid {COLOR_DORADO};
+            border-radius:1rem;
+            padding:1.5rem;
+            margin-top:1rem;
+            box-shadow:0 4px 14px rgba(0,0,0,0.08);">
+        """,
+        unsafe_allow_html=True
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        activo = st.selectbox("Activo", ["BBVA", "Santander"])
+    with col2:
+        dia_idx = st.number_input(
+            "Día futuro (1 = primer día predicho, máx. 5)",
+            min_value=1,
+            max_value=5,
+            value=1,
+            step=1
+        )
+
+    st.markdown("---")
+
+    # obtener precio actual y predicho según lo que haya elegido
+    if activo == "BBVA":
+        precio_actual = BBVA_ACTUAL
+        prediccion_dia = preds_bbva[dia_idx - 1]["BBVA_Close"]
+        fecha_dia = preds_bbva[dia_idx - 1]["Date"]
+    else:
+        precio_actual = SAN_ACTUAL
+        prediccion_dia = preds_san[dia_idx - 1]["SAN_Close"]
+        fecha_dia = preds_san[dia_idx - 1]["Date"]
+
+    diferencia = prediccion_dia - precio_actual  # cálculo interno
+
+    # ======= bloque visual de resultado =======
+    st.markdown(
+        f"""
+        <div style="text-align:center; margin-top:1rem;">
+            <h3 style="color:{COLOR_NEGRO_VERDOSO}; margin-bottom:0.5rem;">{activo} · comparación</h3>
+            <p style="color:{COLOR_NEGRO_VERDOSO}; font-size:0.95rem;">
+                <b>Precio 31/10:</b> {precio_actual:.3f} €<br>
+                <b>Estimado ({fecha_dia}):</b> {prediccion_dia:.3f} €
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # ======= recomendación =======
+    if diferencia <= 0:
+        st.markdown(
+            f"""
+            <div style="background:linear-gradient(135deg,{COLOR_BURDEOS},#200109);
+                        color:white; padding:1.2rem; border-radius:1rem;
+                        border:2px solid {COLOR_DORADO};
+                        text-align:center; font-weight:600;
+                        box-shadow:0 4px 10px rgba(0,0,0,0.15);">
+                ✖ No te recomendamos invertir<br>
+                <span style="font-size:0.9rem;opacity:0.85;">(el precio estimado es menor o igual que el actual)</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            f"""
+            <div style="background:linear-gradient(135deg,{COLOR_VERDE},{COLOR_NEGRO_VERDOSO});
+                        color:white; padding:1.2rem; border-radius:1rem;
+                        border:2px solid {COLOR_DORADO};
+                        text-align:center; font-weight:600;
+                        box-shadow:0 4px 10px rgba(0,0,0,0.15);">
+                ✔ Recomendamos invertir<br>
+                <span style="font-size:0.9rem;opacity:0.85;">(el precio estimado es mayor que el actual)</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"<h4 style='color:{COLOR_NEGRO_VERDOSO};'>Define tu inversión</h4>", unsafe_allow_html=True)
+
+        inversion = st.number_input(
+            "¿Cuánto quieres invertir (€)?",
+            min_value=0.01,
+            max_value=1_000_000.00,
+            value=100.00,
+            step=1.00,
+            format="%.2f",
+            key="inversion_input"
+        )
+
+        boton_html = f"""
+        <div style="text-align:center; margin-top:0.8rem;">
+            <button style="
+                background:linear-gradient(135deg,{COLOR_DORADO},{COLOR_VERDE});
+                color:white;
+                padding:0.9rem 2.2rem;
+                border-radius:1rem;
+                font-weight:700;
+                font-size:1.05rem;
+                border:none;
+                box-shadow:0 4px 12px rgba(0,0,0,0.2);
+                cursor:pointer;">Invertir</button>
+        </div>
+        """
+
+        # usamos un pequeño contenedor HTML para mantener estilo uniforme
+        invertir_btn = st.markdown(boton_html, unsafe_allow_html=True)
+
+        if st.button("Confirmar inversión"):
+            st.markdown(
+                f"""
+                <div style="background:{COLOR_DORADO}33; border:2px solid {COLOR_DORADO};
+                            color:{COLOR_NEGRO_VERDOSO};
+                            border-radius:1rem; padding:1rem; text-align:center;
+                            margin-top:1rem; font-weight:600;">
+                    Inversión con éxito<br>
+                    Has invertido <b>{inversion:.2f} €</b> en <b>{activo}</b>.
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    # cerrar contenedor principal
+    st.markdown("</div>", unsafe_allow_html=True)
